@@ -29,7 +29,7 @@ Tests:
 docker compose run --rm tests
 ```
 
-That runs ruff, the format check, bandit, and pytest. Tests use the database `control_test`.
+That runs ruff, the format check, bandit, and pytest. Tests use the database `control_test`. `tests/test_concurrency.py` fires parallel creates and parallel patches.
 
 ## What a create does
 
@@ -42,6 +42,14 @@ Progress messages use `update_id`. The same id twice changes nothing. If the tas
 `version` starts at 1 and goes up when the tenant row changes. A patch must send the version you last read. Two patches with the same version cannot both succeed.
 
 Slugs stay unique, including after a tenant is destroyed.
+
+## Trade-offs
+
+The publish happens after the database commit. The tenant, the task, and an outbox row are one transaction. A loop sends unpublished rows afterwards. If that request rolls back, there is no row, so nothing is sent. If the process dies after the commit, the next boot sends the row.
+
+RabbitMQ can deliver the same message twice. `update_id` is stored, and a repeat changes nothing. A late `in_progress` does not move a `done` or `failed` task backwards. A `done` still counts if `in_progress` never arrived, so a lost message does not leave the tenant stuck.
+
+`version` goes up only when the tenant row changes. `in_progress` changes the task, not the tenant. `done` and `failed` do change the tenant, so the version goes up. Patch checks the version first. Two patches with the same version cannot both succeed. The loser gets `tenant_version_conflict`.
 
 ## Try it
 
