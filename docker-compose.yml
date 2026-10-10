@@ -1,0 +1,84 @@
+x-app: &app
+  build: .
+  image: tenant-provisioning:local
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: control
+      POSTGRES_PASSWORD: control
+      POSTGRES_DB: control
+    ports:
+      # Host 5433, so a Postgres already installed on 5432 is left alone.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/init-test-db.sql:/docker-entrypoint-initdb.d/01-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U control -d control"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+
+  api:
+    <<: *app
+    command: ["python", "-m", "app.main"]
+    environment:
+      DATABASE_URL: postgresql://control:control@postgres:5432/control
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672/
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: "8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    <<: *app
+    command: ["python", "-m", "worker.sim"]
+    environment:
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672/
+      FAIL_RATE: "0"
+      MIN_DELAY_MS: "400"
+      MAX_DELAY_MS: "900"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  tests:
+    <<: *app
+    profiles: ["test"]
+    command:
+      [
+        "sh",
+        "-c",
+        "ruff check . && ruff format --check . && bandit -q -c pyproject.toml -r app worker scripts && pytest -q",
+      ]
+    environment:
+      DATABASE_URL: postgresql://control:control@postgres:5432/control_test
+      AMQP_URL: amqp://guest:guest@rabbitmq:5672/
+      TASK_QUEUE: provisioning.tasks.tests
+      PROGRESS_QUEUE: provisioning.progress.tests
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  pgdata:
